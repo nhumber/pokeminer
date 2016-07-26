@@ -41,7 +41,7 @@ class SightingCache(object):
         )
 
     def add(self, sighting):
-        self.store(self._make_key(sighting)) = sighting
+        self.store[self._make_key(sighting)] = sighting
 
     def __contains__(self, sighting):
         obj = self.store.get(self._make_key(sighting))
@@ -84,6 +84,7 @@ def normalize_timestamp(timestamp):
 
 
 def add_sighting(session, spawn_id, pokemon):
+    return  # DEBUG
     obj = Sighting(
         pokemon_id=pokemon['id'],
         spawn_id=spawn_id,
@@ -106,7 +107,7 @@ def add_sighting(session, spawn_id, pokemon):
     if existing:
         return
     session.add(obj)
-    CACHE.add(sighting)
+    CACHE.add(obj)
 
 
 def get_sightings(session):
