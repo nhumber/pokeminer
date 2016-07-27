@@ -8,11 +8,12 @@ import sys
 import threading
 import time
 
-# from s2sphere import *
-# from transform import *
-import requests
+from pgoapi import (
+    exceptions as pgoapi_exceptions,
+    PGoApi,
+    utilities as pgoapi_utils,
+)
 
-import api
 import config
 import db
 import utils
@@ -21,7 +22,7 @@ import utils
 pokemons = {}
 workers = {}
 local_data = threading.local()
-api.local_data = local_data
+# api.local_data = local_data
 
 
 def configure_logger(filename='worker.log'):
@@ -56,6 +57,7 @@ class Slave(threading.Thread):
         self.cycle = 0
         self.seen = 0
         self.error_code = None
+        self.api = PGoApi()
 
     def run(self):
         self.cycle = 1
@@ -63,25 +65,25 @@ class Slave(threading.Thread):
 
         # Login sequentially for PTC
         service = config.ACCOUNTS[self.worker_no][2]
-        api_session = local_data.api_session = requests.session()
-        api_session.headers.update({'User-Agent': 'Niantic App'})
-        api_session.verify = False
-        position = api.Position(self.points[0][0], self.points[0][1], 100)
         try:
-            api_endpoint, access_token, profile_response = api.login(
+            self.api.login(
+                provider=service,
                 username=config.ACCOUNTS[self.worker_no][0],
                 password=config.ACCOUNTS[self.worker_no][1],
-                service=service,
-                position=position,
             )
-        except api.CannotGetProfile:
-            # OMG! Sleep for a bit and restart the thread
+        except pgoapi_exceptions.AuthException:
             self.error_code = 'LOGIN FAIL'
+            return
+        except pgoapi_exceptions.NotLoggedInException:
+            self.error_code = 'BAD LOGIN'
+            return
+        except pgoapi_exceptions.ServerBusyOrOfflineException:
+            self.error_code = 'RETRYING'
             time.sleep(random.randint(5, 10))
             start_worker(self.worker_no, self.points)
             return
         while self.cycle <= 3:
-            self.main(service, api_endpoint, access_token, profile_response)
+            self.main()
             self.cycle += 1
             if self.cycle <= 3:
                 self.error_code = 'SLEEP'
@@ -91,21 +93,28 @@ class Slave(threading.Thread):
         time.sleep(random.randint(30, 60))
         start_worker(self.worker_no, self.points)
 
-    def main(self, service, api_endpoint, access_token, profile_response):
+    def main(self):
         session = db.Session()
         self.seen = 0
         for i, point in enumerate(self.points):
             logger.info('Visiting point %d (%s %s)', i, point[0], point[1])
-            pokemons = api.process_step(
-                service,
-                api_endpoint,
-                access_token,
-                profile_response,
-                lat=point[0],
-                lon=point[1],
+            self.api.set_position(point[0], point[1], 0)
+            cell_ids = pgoapi_utils.get_cell_ids(point[0], point[1])
+            self.api.get_map_objects(
+                latitude=pgoapi_utils.f2i(point[0]),
+                longitude=pgoapi_utils.f2i(point[1]),
+                cell_id=cell_ids
             )
-            for pokemon in pokemons:
-                db.add_sighting(session, spawn_id, pokemon)
+            response_dict = self.api.call()
+            now = time.time()
+            map_objects = response_dict['responses']['GET_MAP_OBJECTS']
+            pokemons = []
+            if map_objects.get('status') == 1:
+                for map_cell in map_objects['map_cells']:
+                    for pokemon in map_cell.get('wild_pokemons', []):
+                        pokemons.append(self.normalize_pokemon(pokemon, now))
+            for raw_pokemon in pokemons:
+                db.add_sighting(session, raw_pokemon)
                 self.seen += 1
             logger.info('Point processed, %d Pokemons seen!', len(pokemons))
             session.commit()
@@ -116,6 +125,17 @@ class Slave(threading.Thread):
         session.close()
         if self.seen == 0:
             self.error_code = 'NO POKEMON'
+
+    @staticmethod
+    def normalize_pokemon(raw, now):
+        return {
+            'encounter_id': raw['encounter_id'],
+            'spawn_id': raw['spawn_point_id'],
+            'pokemon_id': raw['pokemon_data']['pokemon_id'],
+            'expire_timestamp': now + raw['time_till_hidden_ms'] / 1000.0,
+            'lat': raw['latitude'],
+            'lon': raw['longitude'],
+        }
 
     @property
     def status(self):
@@ -155,8 +175,6 @@ def get_status_message(workers, count, start_time, points_stats):
 
 
 def start_worker(worker_no, points):
-    # Ok I NEED to global this here
-    global workers
     logger.info('Worker (re)starting up!')
     worker = Slave(
         name='worker-%d' % worker_no,

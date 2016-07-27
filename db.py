@@ -83,15 +83,14 @@ def normalize_timestamp(timestamp):
     return int(float(timestamp) / 120.0) * 120
 
 
-def add_sighting(session, spawn_id, pokemon):
-    return  # DEBUG
+def add_sighting(session, pokemon):
     obj = Sighting(
-        pokemon_id=pokemon['id'],
-        spawn_id=spawn_id,
-        expire_timestamp=pokemon['disappear_time'],
-        normalized_timestamp=normalize_timestamp(pokemon['disappear_time']),
+        pokemon_id=pokemon['pokemon_id'],
+        spawn_id=pokemon['spawn_id'],
+        expire_timestamp=pokemon['expire_timestamp'],
+        normalized_timestamp=normalize_timestamp(pokemon['expire_timestamp']),
         lat=pokemon['lat'],
-        lon=pokemon['lng'],
+        lon=pokemon['lon'],
     )
     # Check if there isn't the same entry already
     if obj in CACHE:
